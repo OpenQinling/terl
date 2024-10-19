@@ -1,0 +1,19 @@
+[package]
+name = "terl"
+version = "0.0.4"
+edition = "2021"
+authors = ["OpenQinling"]
+readme = "README.md"
+repository = "https://github.com/OpenQinling/terl"
+license = "GPL-3.0"
+keywords = ["parser", "compiler"]
+description = "a general parser"
+
+[features]
+default = ["color"]
+parser_calling_tree = []
+color = ["dep:colored"]
+
+
+[dependencies]
+colored = { version = "2.1", optional = true }
