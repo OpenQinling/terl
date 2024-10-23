@@ -225,6 +225,10 @@ pub trait AsBuffer<S>: core::fmt::Debug + AsRef<[S]> {
     fn debug(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.fmt(f)
     }
+
+    fn source(&self) -> &[S] {
+        self.as_ref()
+    }
 }
 
 pub struct Buffer<'a, S>(&'a dyn AsBuffer<S>);

@@ -4,8 +4,8 @@ use crate::*;
 
 #[derive(Debug, Clone, Copy)]
 enum StartIdx {
-    Init(usize),
-    Skiped(usize),
+    Unset(usize),
+    Set(usize),
 }
 
 impl std::ops::Deref for StartIdx {
@@ -13,7 +13,7 @@ impl std::ops::Deref for StartIdx {
 
     fn deref(&self) -> &Self::Target {
         match self {
-            StartIdx::Init(idx) | StartIdx::Skiped(idx) => idx,
+            StartIdx::Unset(idx) | StartIdx::Set(idx) => idx,
         }
     }
 }
@@ -21,7 +21,7 @@ impl std::ops::Deref for StartIdx {
 impl std::ops::DerefMut for StartIdx {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
-            StartIdx::Init(idx) | StartIdx::Skiped(idx) => idx,
+            StartIdx::Unset(idx) | StartIdx::Set(idx) => idx,
         }
     }
 }
@@ -37,7 +37,7 @@ pub(crate) struct ParserState {
 impl ParserState {
     pub(crate) fn fork(&self) -> ParserState {
         Self {
-            start: StartIdx::Init(self.idx),
+            start: StartIdx::Unset(self.idx),
             idx: self.idx,
         }
     }
@@ -46,8 +46,8 @@ impl ParserState {
     pub(crate) fn force_sync(mut self, tmp: &ParserState) -> Self {
         self.idx = tmp.idx;
         self.start = match (self.start, tmp.start) {
-            (StartIdx::Init(..), StartIdx::Skiped(idx)) => StartIdx::Skiped(idx),
-            (idx, ..) => StartIdx::Skiped(*idx),
+            (StartIdx::Unset(..), StartIdx::Set(idx)) => StartIdx::Set(idx),
+            (idx, ..) => StartIdx::Set(*idx),
         };
         self
     }
@@ -194,7 +194,7 @@ impl<S: Source> Parser<S> {
         Parser {
             buffer: src,
             state: ParserState {
-                start: StartIdx::Init(0),
+                start: StartIdx::Unset(0),
                 idx: 0,
             },
             #[cfg(feature = "parser_calling_tree")]
@@ -257,8 +257,8 @@ impl<S: Source> Parser<S> {
     /// or the calling makes no effort
     #[inline]
     pub fn start_taking(&mut self) {
-        if let StartIdx::Init(..) = self.state.start {
-            self.state.start = StartIdx::Skiped(self.current_idx());
+        if let StartIdx::Unset(..) = self.state.start {
+            self.state.start = StartIdx::Set(self.current_idx());
         }
     }
 
@@ -280,17 +280,14 @@ impl<S: Source> Parser<S> {
     /// (if parser_calling_tree feature enabled)
     ///
     /// if the feature is disable, this method has no different with directly call
-    pub fn once_no_try<P, F>(&mut self, parser: F) -> Result<P, ParseError>
-    where
-        F: FnOnce(&mut Parser<S>) -> Result<P, ParseError>,
-    {
+    pub fn parse_no_try<P: ParseUnit<S>>(&mut self, parser: P) -> ParseResult<P, S> {
         #[cfg(feature = "parser_calling_tree")]
         self.calling_tree
             .record_normal::<P>(calling_tree::Calling::Start);
 
         // do parsing
 
-        let result = parser(self);
+        let result = parser.parse(self);
 
         #[cfg(feature = "parser_calling_tree")]
         self.calling_tree
@@ -300,47 +297,53 @@ impl<S: Source> Parser<S> {
         result
     }
 
-    /// try to parse, if the parsing Err, there will be no effect made on [`Parser`]
-    pub fn once<P, F>(&mut self, parser: F) -> Result<P, ParseError>
-    where
-        F: FnOnce(&mut Parser<S>) -> Result<P, ParseError>,
-    {
+    /// parse a [`ParseUnit`], if the parsing fail, throw a [`ParseError`] and the [`Parser`] will
+    /// not be affected.
+    #[inline]
+    pub fn parse<P: ParseUnit<S>>(&mut self, parser: P) -> ParseResult<P, S> {
         // create a temp parser and reset its state
 
         let state = self.state;
         self.state = self.state.fork();
 
-        let result = self.once_no_try::<P, _>(parser);
+        let result = self.parse_no_try::<P>(parser);
         self.state = state.sync_with(&self.state, &result);
 
         result
     }
 
-    /// parse a [`ParseUnit`] by ording the type
-    #[inline]
-    pub fn parse<P: ParseUnit<S>>(&mut self) -> ParseResult<P, S> {
-        self.once(P::parse)
+    /// Start to try parsing a [`ParseUnit`], it will try many times until you get a actually [`Error`]
+    /// or successfully parse a [`ParseUnit`]
+    pub fn r#try<P: ParseUnit<S>>(&mut self, p: P) -> Try<P::Result, S> {
+        Try::new(self).or_try(|parser| p.parse(parser))
     }
 
-    /// calling [`ReverseParseUnit`], testfor if it is able to be parsed
-    #[inline]
-    pub fn r#match<P>(&mut self, rhs: P) -> Result<P::Left, ParseError>
-    where
-        P: ReverseParseUnit<S>,
-    {
-        // also a `try`
-        self.once(|p| rhs.reverse_parse(p))
+    /// Try to parse a [`ParseUnit`], if the parsing fail because of unmatch, return [`None`]
+    pub fn try_match<P: ParseUnit<S>>(&mut self, p: P) -> Result<Option<P::Result>, ParseError> {
+        let result = self.parse(p);
+        let is_unmatch = |e: &ParseError| e.kind() == ParseErrorKind::Unmatch;
+        if result.as_ref().is_err_and(is_unmatch) {
+            Ok(None)
+        } else {
+            result.map(Some)
+        }
+    }
+
+    /// Match a [`ParseUnit`], unmatch error will alse be seen as a semantic error, throw a [`ParseError`]
+    pub fn r#match<P: ParseUnit<S>>(&mut self, p: P) -> ParseResult<P, S> {
+        self.parse(p)
+            .map_err(|e| ParseError::from_error(e.error(), ParseErrorKind::Semantic))
     }
 }
 
 /// a [`Try`], allow you to try many times until you get a actually [`Error`]
 /// or successfully parse a [`ParseUnit`]
-pub struct Try<'p, P: ParseUnit<S>, S: Source> {
+pub struct Try<'p, R, S: Source> {
     parser: &'p mut Parser<S>,
-    state: Option<ParseResult<P, S>>,
+    state: Option<Result<R, ParseError>>,
 }
 
-impl<'p, P: ParseUnit<S>, S: Source> Try<'p, P, S> {
+impl<'p, R, S: Source> Try<'p, R, S> {
     /// create a new [`Try`] from mutable reference to a [`Parser`]
     pub fn new(parser: &'p mut Parser<S>) -> Self {
         Self {
@@ -355,24 +358,16 @@ impl<'p, P: ParseUnit<S>, S: Source> Try<'p, P, S> {
     /// or got a actually [`Error`]
     pub fn or_try<F>(mut self, parser: F) -> Self
     where
-        F: FnOnce(&mut Parser<S>) -> Result<P::Result, ParseError>,
+        F: FnOnce(&mut Parser<S>) -> Result<R, ParseError>,
     {
-        let is_unmatch = self.state.as_ref().is_some_and(|result| {
-            result
-                .as_ref()
-                .is_err_and(|e| e.kind() == ParseErrorKind::Unmatch)
-        });
+        let is_unmatch = |e: &ParseError| e.kind() == ParseErrorKind::Unmatch;
+        let is_unmatch = |result: &Result<R, ParseError>| result.as_ref().is_err_and(is_unmatch);
+        let is_unmatch = self.state.as_ref().is_some_and(is_unmatch);
 
         if self.state.is_none() || is_unmatch {
-            let state = self.parser.once(parser);
+            let state = self.parser.parse(parser);
             self.state = Some(state);
         }
-        self
-    }
-
-    /// set the default error
-    pub fn or_error(mut self, reason: impl ToString) -> Self {
-        self.state = self.state.or_else(|| Some(self.parser.throw(reason)));
         self
     }
 
@@ -381,7 +376,7 @@ impl<'p, P: ParseUnit<S>, S: Source> Try<'p, P, S> {
     ///
     /// there should be at least one [`Self::or_try`] return [`Result::Ok`]
     /// or [`Result::Err`] , or panic
-    pub fn finish(self) -> ParseResult<P, S> {
-        self.state.unwrap()
+    pub fn finish(self) -> Result<R, ParseError> {
+        self.state.expect("never parsed!")
     }
 }

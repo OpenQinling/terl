@@ -1,20 +1,22 @@
-use std::fmt::Debug;
-
 use crate::*;
 
-/// implement for a type and make it be able to be parsed from [`Parser`]
-pub trait ParseUnit<S: Source>: Sized + Debug {
+/// The type that can be used to parse a unit.
+pub trait ParseUnit<S: Source>: Sized {
     /// the type of the parse result
-    type Result: Debug;
+    type Result;
 
     /// you should not call [`ParseUnit::parse`] directly, using methods like [`Parser::once`] instead
-    fn parse(p: &mut Parser<S>) -> Result<Self::Result, ParseError>;
+    fn parse(self, p: &mut Parser<S>) -> Result<Self::Result, ParseError>;
 }
 
-/// testfor is the type can be parsed from [`Parser`]
-pub trait ReverseParseUnit<S: Source> {
-    /// the type of the reverse parse result
-    type Left;
-    /// you should not call [`ReverseParseUnit::reverse_parse`] directly, using [`Parser::r#match`] instead
-    fn reverse_parse(&self, p: &mut Parser<S>) -> Result<Self::Left, ParseError>;
+impl<F, S: Source, R> ParseUnit<S> for F
+where
+    F: FnOnce(&mut Parser<S>) -> Result<R, ParseError>,
+{
+    type Result = R;
+
+    #[inline]
+    fn parse(self, p: &mut Parser<S>) -> Result<R, ParseError> {
+        self(p)
+    }
 }
